@@ -12,7 +12,7 @@ from aiogram.fsm.state import State, StatesGroup
 # ==========================================
 # ⚙️ НАСТРОЙКИ БОТА
 # ==========================================
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН")
 MARZBAN_URL = os.environ.get("MARZBAN_URL", "https://ваша-панель.marzban.url")
 MARZBAN_USERNAME = os.environ.get("MARZBAN_USERNAME", "admin")
 MARZBAN_PASSWORD = os.environ.get("MARZBAN_PASSWORD", "ваш_пароль")
@@ -60,6 +60,11 @@ class MarzbanAPI:
         s, d = await self._req("GET", f"/api/user/{username}")
         return d if s == 200 else None
 
+    # НОВОЕ: Получение списка всех юзеров
+    async def get_all_users(self):
+        s, d = await self._req("GET", "/api/users?limit=100")
+        return d.get("users", []) if s == 200 else []
+
     async def get_inbounds(self):
         s, d = await self._req("GET", "/api/users?limit=10")
         if s != 200: return []
@@ -105,9 +110,7 @@ marzban = MarzbanAPI()
 class AdminFSM(StatesGroup):
     add_username = State()
     add_inbounds = State()
-    add_data = State()
-    add_ip = State()
-    add_days = State()
+    add_params = State()
     find_user = State()
     edit_data = State()
     edit_ip = State()
@@ -115,7 +118,7 @@ class AdminFSM(StatesGroup):
 def admin_menu():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="➕ Создать юзера"), KeyboardButton(text="👤 Найти юзера")],
-        [KeyboardButton(text="📊 Статистика сервера")]
+        [KeyboardButton(text="👥 Список юзеров"), KeyboardButton(text="📊 Статистика сервера")]
     ], resize_keyboard=True)
 
 def user_actions_kb(username):
@@ -149,12 +152,35 @@ async def stats(message: Message):
     if message.from_user.id != ADMIN_ID: return
     s = await marzban.get_system_stats()
     if s:
-        await message.answer(f"📊 <b>Сервер:</b>\n👥 Юзеров: {s.get('total_user',0)}\n🟢 Активных: {s.get('active_user',0)}\n⚡️ Онлайн: {s.get('online_user',0)}\n🌐 Трафик: {s.get('total_traffic',0)/1073741824:.2f} ГБ")
+        await message.answer(
+            f"📊 <b>Статистика сервера:</b>\n\n"
+            f"👥 Всего юзеров: <b>{s.get('total_user',0)}</b>\n"
+            f"🟢 Активных: <b>{s.get('active_user',0)}</b>\n"
+            f"⚡️ Онлайн: <b>{s.get('online_user',0)}</b>\n"
+            f"🌐 Трафик: <b>{s.get('total_traffic',0)/1073741824:.2f} ГБ</b>"
+        )
 
+# --- НОВОЕ: СПИСОК ВСЕХ ЮЗЕРОВ ---
+@dp.message(F.text == "👥 Список юзеров")
+async def list_users(message: Message):
+    if message.from_user.id != ADMIN_ID: return
+    users = await marzban.get_all_users()
+    if not users:
+        await message.answer("❌ Юзеров в панели нет.")
+        return
+    
+    text = "📋 <b>Список последних юзеров:</b>\n\n"
+    for u in users[:30]: # Выводим последних 30, чтобы не перегружать ТГ
+        st = "🟢" if u.get("status") == "active" else "🔴"
+        text += f"{st} <code>{u.get('username')}</code> — {fmt_size(u.get('used_traffic',0))}\n"
+        
+    await message.answer(text)
+
+# --- СОЗДАНИЕ ЮЗЕРА (ИСПРАВЛЕНО) ---
 @dp.message(F.text == "➕ Создать юзера")
 async def add_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
-    await message.answer("Введите <b>username</b> (англ буквы/цифры):")
+    await message.answer("Введите <b>username</b> (только англ буквы/цифры):")
     await state.set_state(AdminFSM.add_username)
 
 @dp.message(AdminFSM.add_username)
@@ -165,7 +191,7 @@ async def add_name(message: Message, state: FSMContext):
     if not inbs:
         await message.answer("❌ В панели нет юзеров для копирования инбаундов."); await state.clear(); return
     await state.update_data(username=message.text, inbs=inbs, sel=[])
-    await message.answer("Выберите инбаунсы:", reply_markup=inbounds_kb(inbs, []))
+    await message.answer("Выберите инбаунсы (нажмите на нужные, затем «Далее»):", reply_markup=inbounds_kb(inbs, []))
     await state.set_state(AdminFSM.add_inbounds)
 
 @dp.callback_query(AdminFSM.add_inbounds, F.data.startswith("inb_"))
@@ -183,38 +209,45 @@ async def add_inb_conf(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
     if not d["sel"]: return await cb.answer("Выберите хотя бы 1!", show_alert=True)
     await cb.message.delete()
-    await cb.message.answer("Лимит <b>ГБ</b>? (0 - безлимит):")
-    await state.set_state(AdminFSM.add_data)
+    # ИСПРАВЛЕНИЕ: Просим всё сразу
+    await cb.message.answer(
+        "Введите данные через пробел в формате:\n"
+        "<code>ГБ IP Дни</code>\n\n"
+        "Пример: <code>30 1 30</code> (30ГБ, 1 устройство, 30 дней)\n"
+        "Пример безлимита: <code>0 0 0</code>"
+    )
+    await state.set_state(AdminFSM.add_params)
 
-@dp.message(AdminFSM.add_data)
-async def add_data(message: Message, state: FSMContext):
-    try: d = float(message.text)
-    except: return await message.answer("❌ Число!")
-    await state.update_data(data=d)
-    await message.answer("Лимит <b>устройств (IP)</b>? (0 - без лимита):")
-    await state.set_state(AdminFSM.add_ip)
+@dp.message(AdminFSM.add_params)
+async def add_params(message: Message, state: FSMContext):
+    parts = message.text.split()
+    if len(parts) != 3:
+        await message.answer("❌ Нужно ровно 3 числа через пробел! Пример: <code>30 1 30</code>"); return
+    
+    try:
+        data_gb = float(parts[0])
+        ip_limit = int(parts[1])
+        days = int(parts[2])
+    except ValueError:
+        await message.answer("❌ Ошибка формата! Пример: <code>30 1 30</code>"); return
 
-@dp.message(AdminFSM.add_ip)
-async def add_ip(message: Message, state: FSMContext):
-    try: ip = int(message.text)
-    except: return await message.answer("❌ Целое число!")
-    await state.update_data(ip=ip)
-    await message.answer("Срок в <b>днях</b>? (0 - бессрочно):")
-    await state.set_state(AdminFSM.add_days)
-
-@dp.message(AdminFSM.add_days)
-async def add_days(message: Message, state: FSMContext):
-    try: days = int(message.text)
-    except: return await message.answer("❌ Целое число!")
     d = await state.get_data()
     sel_inbs = [d["inbs"][i] for i in d["sel"]]
-    ok = await marzban.add_user(d["username"], d["data"], d["ip"], days, sel_inbs)
+    ok = await marzban.add_user(d["username"], data_gb, ip_limit, days, sel_inbs)
+    
     if ok:
-        await message.answer(f"✅ Юзер <b>{d['username']}</b> создан!\n💾 {d['data']} ГБ | 📱 {d['ip']} IP | ⏳ {days} дней", reply_markup=admin_menu())
+        await message.answer(
+            f"✅ Юзер <b>{d['username']}</b> успешно создан!\n\n"
+            f"💾 Лимит: {data_gb if data_gb > 0 else '♾'} ГБ\n"
+            f"📱 Устройств: {ip_limit if ip_limit > 0 else '♾'}\n"
+            f"⏳ Дней: {days if days > 0 else '♾'}",
+            reply_markup=admin_menu()
+        )
     else:
-        await message.answer("❌ Ошибка создания.", reply_markup=admin_menu())
+        await message.answer("❌ Ошибка создания. Возможно, юзер уже существует.", reply_markup=admin_menu())
     await state.clear()
 
+# --- ПОИСК ЮЗЕРА (ИСПРАВЛЕНО) ---
 @dp.message(F.text == "👤 Найти юзера")
 async def find_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -223,18 +256,31 @@ async def find_start(message: Message, state: FSMContext):
 
 @dp.message(AdminFSM.find_user)
 async def find_end(message: Message, state: FSMContext):
-    u = await marzban.get_user(message.text)
-    if not u: return await message.answer("❌ Не найден", reply_markup=admin_menu()), await state.clear()
+    username = message.text.strip().lower() # ИСПРАВЛЕНО: приводим к нижнему регистру
+    u = await marzban.get_user(username)
+    if not u: 
+        await message.answer("❌ Не найден", reply_markup=admin_menu())
+        await state.clear()
+        return
+        
     st = "🟢 Активен" if u.get("status") == "active" else "🔴 Заблокирован"
     lim = fmt_size(u.get("data_limit",0)) if u.get("data_limit",0) > 0 else "Безлимит"
     ip = u.get("device_limit",0) if u.get("device_limit",0) > 0 else "Без лимита"
-    txt = f"👤 <code>{message.text}</code>\nСтатус: {st}\n💾 {fmt_size(u.get('used_traffic',0))} / {lim}\n📱 IP: {ip}\n⏳ До: {fmt_date(u.get('expire',0))}"
-    await message.answer(txt, reply_markup=user_actions_kb(message.text))
+    
+    text = (
+        f"👤 <b>Профиль клиента:</b> <code>{username}</code>\n\n"
+        f"📊 Статус: {st}\n"
+        f"🌐 Трафик: {fmt_size(u.get('used_traffic',0))} / {lim}\n"
+        f"📱 Лимит IP: {ip}\n"
+        f"⏳ Действует до: {fmt_date(u.get('expire',0))}"
+    )
+    await message.answer(text, reply_markup=user_actions_kb(username))
     await state.clear()
 
 @dp.callback_query(F.data.startswith("reset_"))
 async def cb_reset(cb: CallbackQuery):
-    if await marzban.reset_traffic(cb.data.split("_")[1]): await cb.answer("Трафик сброшен!", show_alert=True)
+    if await marzban.reset_traffic(cb.data.split("_")[1]): 
+        await cb.answer("✅ Трафик сброшен!", show_alert=True)
 
 @dp.callback_query(F.data.startswith("block_"))
 async def cb_block(cb: CallbackQuery):
@@ -242,18 +288,18 @@ async def cb_block(cb: CallbackQuery):
     u = await marzban.get_user(un)
     ns = "disabled" if u.get("status") == "active" else "active"
     if await marzban.modify_user(un, {"status": ns}):
-        await cb.answer(f"Статус: {ns}", show_alert=True)
+        await cb.answer(f"Статус изменен на: {ns}", show_alert=True)
 
 @dp.callback_query(F.data.startswith("del_"))
 async def cb_del(cb: CallbackQuery):
     if await marzban.delete_user(cb.data.split("_")[1]):
-        await cb.message.edit_text("🗑 Удален.")
+        await cb.message.edit_text("🗑 Юзер удален.")
 
 @dp.callback_query(F.data.startswith("edata_"))
 async def cb_edata(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.edit_data)
     await state.update_data(u=cb.data.split("_")[1])
-    await cb.message.answer("Новый лимит ГБ? (0 - безлимит):")
+    await cb.message.answer("Введите новый лимит ГБ (0 - безлимит):")
 
 @dp.message(AdminFSM.edit_data)
 async def fn_edata(message: Message, state: FSMContext):
@@ -269,7 +315,7 @@ async def fn_edata(message: Message, state: FSMContext):
 async def cb_eip(cb: CallbackQuery, state: FSMContext):
     await state.set_state(AdminFSM.edit_ip)
     await state.update_data(u=cb.data.split("_")[1])
-    await cb.message.answer("Новый лимит устройств (IP)? (0 - без лимита):")
+    await cb.message.answer("Введите новый лимит IP (0 - без лимита):")
 
 @dp.message(AdminFSM.edit_ip)
 async def fn_eip(message: Message, state: FSMContext):
