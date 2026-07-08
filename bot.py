@@ -4,6 +4,8 @@ import time
 import os
 from aiohttp import web
 from aiogram import Bot, Dispatcher, F
+from aiogram.client.default import DefaultBotProperties
+from aiogram.enums import ParseMode
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -18,7 +20,8 @@ MARZBAN_USERNAME = os.environ.get("MARZBAN_USERNAME", "admin")
 MARZBAN_PASSWORD = os.environ.get("MARZBAN_PASSWORD", "ваш_пароль")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 
-bot = Bot(token=BOT_TOKEN)
+# ИСПРАВЛЕНО: Указываем боту читать HTML-теги (жирный шрифт и тд)
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
 class MarzbanAPI:
@@ -60,14 +63,16 @@ class MarzbanAPI:
         s, d = await self._req("GET", f"/api/user/{username}")
         return d if s == 200 else None
 
-    # НОВОЕ: Получение списка всех юзеров
+    # ИСПРАВЛЕНО: Убрали лимиты, чтобы точно подтягивало всех юзеров
     async def get_all_users(self):
-        s, d = await self._req("GET", "/api/users?limit=100")
-        return d.get("users", []) if s == 200 else []
+        s, d = await self._req("GET", "/api/users")
+        if s == 200 and isinstance(d, dict):
+            return d.get("users", [])
+        return []
 
     async def get_inbounds(self):
-        s, d = await self._req("GET", "/api/users?limit=10")
-        if s != 200: return []
+        s, d = await self._req("GET", "/api/users")
+        if s != 200 or not isinstance(d, dict): return []
         inbs = {}
         for u in d.get("users", []):
             for p, tags in u.get("inbounds", {}).items():
@@ -76,6 +81,7 @@ class MarzbanAPI:
                     if t not in inbs[p]: inbs[p].append(t)
         return [(p, t) for p, ts in inbs.items() for t in ts]
 
+    # ИСПРАВЛЕНО: Функция возвращает данные созданного юзера (чтобы достать ссылку)
     async def add_user(self, username, data_gb, ip_limit, days, sel_inbs):
         expire = int(time.time()) + (days * 86400) if days > 0 else 0
         limit_b = int(data_gb * 1073741824) if data_gb > 0 else 0
@@ -90,8 +96,8 @@ class MarzbanAPI:
             "expire": expire, "data_limit": limit_b, "data_limit_reset_strategy": "no_reset",
             "device_limit": ip_limit
         }
-        s, _ = await self._req("POST", "/api/user", payload)
-        return s == 200
+        s, d = await self._req("POST", "/api/user", payload)
+        return d if s == 200 else None
 
     async def modify_user(self, username, payload):
         s, d = await self._req("PUT", f"/api/user/{username}", payload)
@@ -160,7 +166,6 @@ async def stats(message: Message):
             f"🌐 Трафик: <b>{s.get('total_traffic',0)/1073741824:.2f} ГБ</b>"
         )
 
-# --- НОВОЕ: СПИСОК ВСЕХ ЮЗЕРОВ ---
 @dp.message(F.text == "👥 Список юзеров")
 async def list_users(message: Message):
     if message.from_user.id != ADMIN_ID: return
@@ -169,14 +174,13 @@ async def list_users(message: Message):
         await message.answer("❌ Юзеров в панели нет.")
         return
     
-    text = "📋 <b>Список последних юзеров:</b>\n\n"
-    for u in users[:30]: # Выводим последних 30, чтобы не перегружать ТГ
+    text = "📋 <b>Список юзеров (последние 30):</b>\n\n"
+    for u in users[:30]:
         st = "🟢" if u.get("status") == "active" else "🔴"
         text += f"{st} <code>{u.get('username')}</code> — {fmt_size(u.get('used_traffic',0))}\n"
         
     await message.answer(text)
 
-# --- СОЗДАНИЕ ЮЗЕРА (ИСПРАВЛЕНО) ---
 @dp.message(F.text == "➕ Создать юзера")
 async def add_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -209,7 +213,6 @@ async def add_inb_conf(cb: CallbackQuery, state: FSMContext):
     d = await state.get_data()
     if not d["sel"]: return await cb.answer("Выберите хотя бы 1!", show_alert=True)
     await cb.message.delete()
-    # ИСПРАВЛЕНИЕ: Просим всё сразу
     await cb.message.answer(
         "Введите данные через пробел в формате:\n"
         "<code>ГБ IP Дни</code>\n\n"
@@ -233,21 +236,27 @@ async def add_params(message: Message, state: FSMContext):
 
     d = await state.get_data()
     sel_inbs = [d["inbs"][i] for i in d["sel"]]
-    ok = await marzban.add_user(d["username"], data_gb, ip_limit, days, sel_inbs)
     
-    if ok:
+    # ИСПРАВЛЕНО: Получаем данные созданного юзера
+    user_data = await marzban.add_user(d["username"], data_gb, ip_limit, days, sel_inbs)
+    
+    if user_data:
+        sub_url = user_data.get("subscription_url", "")
+        if sub_url and not sub_url.startswith("http"):
+            sub_url = MARZBAN_URL + sub_url
+            
         await message.answer(
             f"✅ Юзер <b>{d['username']}</b> успешно создан!\n\n"
             f"💾 Лимит: {data_gb if data_gb > 0 else '♾'} ГБ\n"
             f"📱 Устройств: {ip_limit if ip_limit > 0 else '♾'}\n"
-            f"⏳ Дней: {days if days > 0 else '♾'}",
+            f"⏳ Дней: {days if days > 0 else '♾'}\n\n"
+            f"🔗 <b>Ссылка на подписку:</b>\n<code>{sub_url}</code>",
             reply_markup=admin_menu()
         )
     else:
         await message.answer("❌ Ошибка создания. Возможно, юзер уже существует.", reply_markup=admin_menu())
     await state.clear()
 
-# --- ПОИСК ЮЗЕРА (ИСПРАВЛЕНО) ---
 @dp.message(F.text == "👤 Найти юзера")
 async def find_start(message: Message, state: FSMContext):
     if message.from_user.id != ADMIN_ID: return
@@ -256,7 +265,7 @@ async def find_start(message: Message, state: FSMContext):
 
 @dp.message(AdminFSM.find_user)
 async def find_end(message: Message, state: FSMContext):
-    username = message.text.strip().lower() # ИСПРАВЛЕНО: приводим к нижнему регистру
+    username = message.text.strip().lower()
     u = await marzban.get_user(username)
     if not u: 
         await message.answer("❌ Не найден", reply_markup=admin_menu())
@@ -267,12 +276,18 @@ async def find_end(message: Message, state: FSMContext):
     lim = fmt_size(u.get("data_limit",0)) if u.get("data_limit",0) > 0 else "Безлимит"
     ip = u.get("device_limit",0) if u.get("device_limit",0) > 0 else "Без лимита"
     
+    # НОВОЕ: Получаем ссылку на подписку
+    sub_url = u.get("subscription_url", "")
+    if sub_url and not sub_url.startswith("http"):
+        sub_url = MARZBAN_URL + sub_url
+        
     text = (
         f"👤 <b>Профиль клиента:</b> <code>{username}</code>\n\n"
         f"📊 Статус: {st}\n"
         f"🌐 Трафик: {fmt_size(u.get('used_traffic',0))} / {lim}\n"
         f"📱 Лимит IP: {ip}\n"
-        f"⏳ Действует до: {fmt_date(u.get('expire',0))}"
+        f"⏳ Действует до: {fmt_date(u.get('expire',0))}\n\n"
+        f"🔗 <b>Ссылка на подписку:</b>\n<code>{sub_url}</code>"
     )
     await message.answer(text, reply_markup=user_actions_kb(username))
     await state.clear()
