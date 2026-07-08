@@ -17,7 +17,7 @@ from aiogram.fsm.state import State, StatesGroup
 # ⚙️ НАСТРОЙКИ БОТА
 # ==========================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН")
-MARZBAN_URL = os.environ.get("MARZBAN_URL", "https://ваша-панель.marzban.url")
+MARZBAN_URL = os.environ.get("MARZBAN_URL", "https://vpn-51-38-140-212.sslip.io")
 MARZBAN_USERNAME = os.environ.get("MARZBAN_USERNAME", "admin")
 MARZBAN_PASSWORD = os.environ.get("MARZBAN_PASSWORD", "ваш_пароль")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
@@ -174,7 +174,6 @@ def user_actions_kb(username):
     ])
 
 def links_kb(username, sub_url):
-    # Генерируем Happ Deep Link
     happ_url = f"happ://add/{base64.b64encode(sub_url.encode()).decode()}"
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="📲 Открыть в Happ", url=happ_url)],
@@ -217,8 +216,10 @@ async def cmd_start(message: Message, state: FSMContext):
     else:
         await message.answer("🚫 <b>Access Denied</b>")
 
+# ИСПРАВЛЕНО: Добавлена очистка состояния (state.clear()) во все кнопки меню
 @dp.message(F.text == "📊 Сервер")
-async def stats(message: Message):
+async def stats(message: Message, state: FSMContext):
+    await state.clear()
     if message.from_user.id != ADMIN_ID: return
     s = await marzban.get_system_stats()
     if s:
@@ -235,9 +236,9 @@ async def stats(message: Message):
             f"Всего отдано: <b>{fmt_size(s.get('total_traffic',0))}</b>"
         )
 
-# --- ПАГИНАЦИЯ СПИСКА ---
 @dp.message(F.text == "👥 Список")
-async def list_users(message: Message):
+async def list_users(message: Message, state: FSMContext):
+    await state.clear()
     if message.from_user.id != ADMIN_ID: return
     users = await marzban.get_all_users()
     if not users:
@@ -283,9 +284,9 @@ async def view_user_from_list(cb: CallbackQuery):
     await cb.message.delete()
     await cb.message.answer(await format_user_text(u), reply_markup=user_actions_kb(un))
 
-# --- СОЗДАНИЕ ---
 @dp.message(F.text == "➕ Создать")
 async def add_start(message: Message, state: FSMContext):
+    await state.clear()
     if message.from_user.id != ADMIN_ID: return
     await message.answer("👤 Введите <b>username</b> нового клиента:", reply_markup=cancel_kb())
     await state.set_state(AdminFSM.add_username)
@@ -373,9 +374,9 @@ async def finish_user_creation(message, state):
         await message.answer("❌ Ошибка создания.", reply_markup=main_menu_kb())
     await state.clear()
 
-# --- ПОИСК ---
 @dp.message(F.text == "🔍 Найти")
 async def find_start(message: Message, state: FSMContext):
+    await state.clear()
     if message.from_user.id != ADMIN_ID: return
     await message.answer("🔍 Введите <b>username</b> клиента:", reply_markup=cancel_kb())
     await state.set_state(AdminFSM.find_user)
@@ -413,7 +414,6 @@ async def format_user_text(u):
         f"🔗 <b>Ссылка:</b>\n<code>{sub_url}</code>"
     )
 
-# --- ДЕЙСТВИЯ В ПРОФИЛЕ ---
 @dp.callback_query(F.data == "cancel")
 async def cb_cancel(cb: CallbackQuery, state: FSMContext):
     await state.clear()
