@@ -2,6 +2,7 @@ import asyncio
 import aiohttp
 import time
 import os
+from aiohttp import web
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.filters import CommandStart
@@ -9,7 +10,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 
 # ==========================================
-# ⚙️ НАСТРОЙКИ БОТА (Берутся из переменных окружения)
+# ⚙️ НАСТРОЙКИ БОТА
 # ==========================================
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВАШ_ТОКЕН_ОТ_BOTFATHER")
 MARZBAN_URL = os.environ.get("MARZBAN_URL", "https://ваша-панель.marzban.url")
@@ -17,9 +18,6 @@ MARZBAN_USERNAME = os.environ.get("MARZBAN_USERNAME", "admin")
 MARZBAN_PASSWORD = os.environ.get("MARZBAN_PASSWORD", "ваш_пароль")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "123456789"))
 
-# ==========================================
-# 🚀 ИНИЦИАЛИЗАЦИЯ
-# ==========================================
 bot = Bot(token=BOT_TOKEN)
 dp = Dispatcher()
 
@@ -31,10 +29,6 @@ class MarzbanAPI:
 
     async def init_session(self):
         self.session = aiohttp.ClientSession()
-
-    async def close_session(self):
-        if self.session:
-            await self.session.close()
 
     async def login(self):
         url = f"{self.base_url}/api/admin/token"
@@ -108,9 +102,6 @@ class MarzbanAPI:
 
 marzban = MarzbanAPI()
 
-# ==========================================
-# 🧠 FSM (Состояния)
-# ==========================================
 class AdminFSM(StatesGroup):
     add_username = State()
     add_inbounds = State()
@@ -121,9 +112,6 @@ class AdminFSM(StatesGroup):
     edit_data = State()
     edit_ip = State()
 
-# ==========================================
-# ⌨️ КЛАВИАТУРЫ
-# ==========================================
 def admin_menu():
     return ReplyKeyboardMarkup(keyboard=[
         [KeyboardButton(text="➕ Создать юзера"), KeyboardButton(text="👤 Найти юзера")],
@@ -147,9 +135,6 @@ def inbounds_kb(avail, sel):
 def fmt_size(b): return "0 ГБ" if b == 0 else f"{b/1073741824:.2f} ГБ"
 def fmt_date(t): return "Бессрочно" if t == 0 else time.strftime("%d.%m.%Y", time.localtime(t))
 
-# ==========================================
-# 📩 ХЭНДЛЕРЫ
-# ==========================================
 @dp.message(CommandStart())
 async def cmd_start(message: Message, state: FSMContext):
     await state.clear()
@@ -295,8 +280,19 @@ async def fn_eip(message: Message, state: FSMContext):
         await message.answer(f"✅ Лимит IP изменен на {v}.", reply_markup=admin_menu())
     await state.clear()
 
+# Веб-сервер для Hugging Face
+async def handle_health(request):
+    return web.Response(text="Bot is running!")
+
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
+    app = web.Application()
+    app.router.add_get("/", handle_health)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', 7860)
+    await site.start()
+    print("🌐 Веб-сервер запущен на порту 7860")
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
